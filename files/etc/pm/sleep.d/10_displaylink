@@ -1,0 +1,1 @@
+/opt/displaylink/suspend.sh

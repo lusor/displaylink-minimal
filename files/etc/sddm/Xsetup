@@ -1,0 +1,3 @@
+#!/bin/sh
+xrandr --output $(xrandr --current | grep -w connected | tail -1 | cut -d ' ' -f 1) --auto
+exec /usr/share/sddm/scripts/Xsetup

@@ -1,0 +1,8 @@
+[Unit]
+Description=DisplayLink Driver Service
+
+[Service]
+ExecStart=/opt/displaylink/DisplayLinkManager
+Restart=always
+WorkingDirectory=/opt/displaylink
+RestartSec=5
