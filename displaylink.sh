@@ -14,47 +14,54 @@ error() {
 }
 
 check_prerequisites() {
-  [ $(id -u) -eq 0 ] || groups | grep -qw sudo || error 'Needs to be run by a user with sudo privileges or root'
+  echo 'Checking prerequisites'
   ps --no-headers -o comm 1 | grep -q systemd || error 'System is not using systemd'
+  ! systemctl -q is-active displaylink-driver.service || error 'DisplayLink service is running, cannot update'
   pkgs=$(apt-cache search evdi | cut -d ' ' -f 1 | grep -v -- -dev$)
   echo "$pkgs" | grep -q '^evdi-dkms$' || error 'Package evdi-dkms is not available'
   echo "$pkgs" | grep -q '^libevdi' || error 'Package libevdi* is not available'
+  [ $(id -u) -eq 0 ] || groups | grep -qw sudo || error 'Needs to be run by a user with sudo privileges or root'
 }
 
 sudo_install() {
+  echo 'Copying files'
   for dir in "$filesDir" "$(dirname "$0")/files"; do
     for file in $(find "$dir" -not -type d | sort); do
-      if echo "$file" | grep -q sddm; then
+      targetFile=$(echo "$file" | sed 's+.*files/+/+')
+      targetDir=$(dirname "$targetFile")
+
+      if echo "$file" | grep -q 'sddm'; then
         if ! dpkg -l | grep -q '^ii *sddm '; then
-          echo "Skipping $file as sddm is not installed" >&2
+          echo "  Skipping $targetFile as sddm is not installed" >&2
           continue
-        elif [ -f "$(echo "$file" | sed 's+.*files/+/+')" ]; then
-          echo "Skipping $file (will not overwrite)" >&2
-          continue
-        fi
-      fi
-
-      fDir=$(dirname "$file" | sed 's+.*files/+/+')
-
-      if echo "$fDir" | grep -q '^/etc/X11/xorg.conf.d'; then
-        if [ ! -d "$fDir" ]; then
-          echo "Skipping $file as X11 is not installed" >&2
-          continue
-        elif [ -f "$(echo "$file" | sed 's+.*files/+/+')" ]; then
-          echo "Skipping $file (will not overwrite)" >&2
+        elif [ -f "$targetFile" ]; then
+          echo "  Skipping $targetFile (will not overwrite)" >&2
           continue
         fi
       fi
 
-      [ -d "$fDir" ] || mkdir -vp "$fDir"
-      cp -vd "$file" "$fDir"
+      if echo "$file" | grep -q 'xorg.conf.d'; then
+        if [ ! -d "$targetDir" ]; then
+          echo "  Skipping $targetFile as X11 is not installed" >&2
+          continue
+        elif [ -f "$targetFile" ]; then
+          echo "  Skipping $targetFile (will not overwrite)" >&2
+          continue
+        fi
+      fi
+
+      [ -d "$targetDir" ] || { echo "  Creating $targetDir"; mkdir -p "$targetDir"; }
+      echo "  Copying $targetFile"
+      cp -d "$file" "$targetDir"
     done
   done
 
   sed -i "s/###SOFTDEPS###/$(lsmod | grep ^drm_kms_helper | sed 's/.* //;s/evdi//;s/,,/,/;s/^,//;s/,$//' | tr , ' ')/" /etc/modprobe.d/evdi.conf
+  echo 'Installing EVDI kernel module and library'
   dpkg -l | grep -q '^ii *evdi-dkms ' || apt-get install evdi-dkms
   dpkg -l | grep -q '^ii *libevdi' || apt-get install $(apt-cache depends evdi-dkms | grep -o 'libevdi[^ ]*' | head -1 | grep .)
   ln -sf $(dpkg -S libevdi.so | sort | head -1 | sed 's/.*: //' | grep .) /opt/displaylink/libevdi.so
+  echo 'Checking EFI status'
 
   if [ -d /sys/firmware/efi ]; then
     dpkg -l | grep -q '^ii *mokutil ' || apt-get install mokutil
@@ -80,6 +87,7 @@ sudo_install() {
     echo 'Installation has been successful. A reboot is necessary as the kernel module (evdi) must be loaded before X11 is started'
     exit
     # X11 freezes when evdi module is loaded. Otherwise, the code below would work
+    echo 'Reloading systemd and udev'
     systemctl daemon-reload
     udevadm control -R
     echo
@@ -94,16 +102,20 @@ sudo_install() {
 }
 
 install() {
+  echo "Installing from $1"
   check_prerequisites
+  echo 'Unpacking DisplayLinkSoftware'
   tmpDir=$(mktemp -d)
-  trap "rm -r '$tmpDir'" INT QUIT EXIT
+  trap "rm -rf '$tmpDir'" INT QUIT EXIT
   unzip -q "$1" -d "$tmpDir"
   driverDir="$tmpDir/displaylink-driver"
   mkdir "$driverDir" && (cd "$driverDir" && sh "$tmpDir"/displaylink-driver-*-*.run --tar xf && [ -f LICENSE ])
+  echo 'Preparing files to copy'
   filesDir="$tmpDir/files"
   mkdir -p "$filesDir/opt/displaylink" && (cd "$driverDir" && mv 3rd_party_licences.txt LICENSE *.spkg x64-*/* "$filesDir/opt/displaylink")
 
   if [ $(id -u) -ne 0 ]; then
+    echo
     echo "Needing root privileges now to copy files"
     echo 'Press Return to continue'
     read line
