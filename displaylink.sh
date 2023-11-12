@@ -16,15 +16,34 @@ error() {
 check_prerequisites() {
   echo 'Checking prerequisites'
   ps --no-headers -o comm 1 | grep -q systemd || error 'System is not using systemd'
-  ! systemctl -q is-active displaylink-driver.service || error 'DisplayLink service is running, cannot update'
   pkgs=$(apt-cache search evdi | cut -d ' ' -f 1 | grep -v -- -dev$)
   echo "$pkgs" | grep -q '^evdi-dkms$' || error 'Package evdi-dkms is not available'
   echo "$pkgs" | grep -q '^libevdi' || error 'Package libevdi* is not available'
   [ $(id -u) -eq 0 ] || groups | grep -qw sudo || error 'Needs to be run by a user with sudo privileges or root'
 }
 
+check_service() {
+  if systemctl -q is-active displaylink-driver.service; then
+    echo
+    echo "DisplayLink service is running, will stop it now"
+    echo 'Press Return to continue'
+    read line
+    systemctl stop displaylink-driver.service
+  fi
+}
+
+check_root() {
+  if [ $(id -u) -ne 0 ]; then
+    echo
+    echo "Needing root privileges now to copy files"
+    echo 'Press Return to continue'
+    read line
+  fi
+}
+
 sudo_install() {
   echo 'Copying files'
+
   for dir in "$filesDir" "$(dirname "$0")/files"; do
     for file in $(find "$dir" -not -type d | sort); do
       targetFile=$(echo "$file" | sed 's+.*files/+/+')
@@ -104,6 +123,7 @@ sudo_install() {
 install() {
   echo "Installing from $1"
   check_prerequisites
+  check_service
   echo 'Unpacking DisplayLinkSoftware'
   tmpDir=$(mktemp -d)
   trap "rm -rf '$tmpDir'" INT QUIT EXIT
@@ -113,21 +133,57 @@ install() {
   echo 'Preparing files to copy'
   filesDir="$tmpDir/files"
   mkdir -p "$filesDir/opt/displaylink" && (cd "$driverDir" && mv 3rd_party_licences.txt LICENSE *.spkg x64-*/* "$filesDir/opt/displaylink")
-
-  if [ $(id -u) -ne 0 ]; then
-    echo
-    echo "Needing root privileges now to copy files"
-    echo 'Press Return to continue'
-    read line
-  fi
-
+  check_root
   sudo "$0" sudo_install "$filesDir"
 }
 
+rmdir_recursive() {
+  if [ $(ls -a "$1" | wc -l) -eq 2 ] && ! dpkg -S "$1" >/dev/null 2>&1; then
+    echo "  Removing directory $1"
+    rmdir "$1"
+    rmdir_recursive "$(dirname "$1")"
+  fi
+}
+
+sudo_uninstall() {
+  echo 'Removing files'
+
+  for file in $(find "$(dirname "$0")/files" -not -type d | grep -v /files/opt/displaylink/ | sort); do
+    targetFile=$(echo "$file" | sed 's+.*files/+/+')
+    targetDir=$(dirname "$targetFile")
+    [ -e "$targetFile" ] || continue
+
+    if echo "$file" | grep -qE 'sddm|xorg.conf.d'; then
+      if [ "$(cat "$targetFile" | md5sum)" != "$(cat "$file" | md5sum)" ]; then
+        echo "  Skipping $targetFile as it differs from included file" >&2
+        continue
+      fi
+    fi
+
+    echo "  Removing $targetFile"
+    rm "$targetFile"
+    rmdir_recursive "$targetDir"
+  done
+
+  if [ -d /opt/displaylink ]; then
+    echo '  Removing /opt/displaylink'
+    rm -r /opt/displaylink
+  fi
+
+  echo 'Reloading systemd and udev'
+  systemctl daemon-reload
+  udevadm control -R
+  echo 'Uninstalling EVDI kernel module and library'
+  dpkg -l | grep -q '^ii *evdi-dkms ' && apt-get purge evdi-dkms $(dpkg -l | grep '^ii *libevdi' | sed 's/^ii *//;s/ .*//')
+  echo
+  echo 'Uninstall has been successful. The kernel module (evdi) will be unloaded with next reboot/shutdown'
+}
+
 uninstall() {
-  # TODO
-  echo 'Unimplemented!!!!' >&2
-  exit 1
+  echo 'Uninstalling'
+  check_service
+  check_root
+  sudo "$0" sudo_uninstall
 }
 
 if [ "$1" = '--uninstall' ]; then
@@ -137,6 +193,8 @@ elif [ -f "$1" ] && basename "$1" | grep -q '^DisplayLink USB Graphics Software 
 elif [ "$1" = 'sudo_install' -a -d "$2" ]; then
   filesDir=$2
   sudo_install
+elif [ "$1" = 'sudo_uninstall' ]; then
+  sudo_uninstall
 else
   usage
 fi
